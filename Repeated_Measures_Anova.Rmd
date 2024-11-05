@@ -1,0 +1,232 @@
+---
+title: "HOI_LLK_Repeated_Measures_ANOVA"
+output:
+  html_document: default
+  pdf_document: 
+    latex_engine: lualatex
+  word_document: default
+date: "2024-10-09"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(sjPlot)
+library(broom)
+library(effectsize)
+library(afex)
+library(emmeans)
+library(ggpubr)
+library(rstatix)
+library(broom.mixed)  # For tidying lmer model output
+#rm(list = ls())
+```
+
+
+```{r}
+#Load the dataframes
+features_1H_raw<- read_csv("Features_1H.csv")
+features_24H_raw<- read_csv("Features_24H.csv")
+features_Day7_raw<- read_csv("Features_Day7.csv")
+```
+
+> Data Wrangling
+
+### Converting into binary factors and imputing missing data
+
+```{r}
+#Convert the group into a binary factor variables for all 3 datasets
+features_1H_raw<-features_1H_raw%>%
+  mutate(Group= factor(ifelse(Group == "Ketamine", 1, 0)))
+features_24H_raw<-features_24H_raw%>%
+  mutate(Group= factor(ifelse(Group == "Ketamine", 1, 0)))
+features_Day7_raw<-features_Day7_raw%>%
+  mutate(Group= factor(ifelse(Group == "Ketamine", 1, 0)))
+
+
+#Impute missing data by calculating mean for the rest of the column
+#1H
+features_1H_imputed <- features_1H_raw %>%
+  mutate(across(-all_of("Group"), ~ ifelse(is.na(.), mean(., na.rm = TRUE), .)))
+#24H
+#RS_024 in 24H data has bad data; replace all values with NA and then impute
+features_24H_raw <- features_24H_raw %>%
+  mutate(across(-c(1:3), ~ ifelse(subject_id == "RS_024_deltas", NA, .)))
+#Impute 
+features_24H_imputed <- features_24H_raw %>%
+  mutate(across(-all_of("Group"), ~ ifelse(is.na(.), mean(., na.rm = TRUE), .)))
+#Day 7
+features_Day7_imputed <- features_Day7_raw %>%
+  mutate(across(-all_of("Group"), ~ ifelse(is.na(.), mean(., na.rm = TRUE), .)))
+
+#write.csv(features_1H_imputed, "Features_1H_imputed.csv")
+#write.csv(features_24H_imputed, "Features_24H_imputed.csv")
+#write.csv(features_Day7_imputed, "Features_Day7_imputed.csv")
+
+
+```
+
+### Converting into one long dataframe
+
+```{r}
+# Combine timepoint datasets into one long format
+features_combined <- bind_rows(
+  mutate(features_1H_imputed, timepoint = "1H"),
+  mutate(features_24H_imputed, timepoint = "24H"),
+  mutate(features_Day7_imputed, timepoint = "Day7")
+)
+
+# Gather measures and frequency bands
+features_long <- features_combined %>%
+  pivot_longer(
+    cols = -c(subject_id, Group, timepoint, ...1),  # Keep 'subject' and 'timepoint' columns
+    names_to = c("frequency_band", "measure"),  # Separate column names into 'frequency_band' and 'measure'
+    names_pattern = "([A-Za-z]+)_([A-Z]+)",
+    values_to = "value"  # The new column for the values
+  )
+
+#Make subject_id into a factor
+
+features_long<-features_long%>%
+  mutate(subject_id=as.factor(subject_id))
+  
+#Turn features_long from a tibble to a dataframe
+features_long <- as.data.frame(features_long)
+
+
+# View the structure of the long-format dataset
+str(features_long)
+
+# Preview the first few rows
+head(features_long)
+
+#Wrangle it for curvefitting
+features_long_filtered <- features_long %>%
+  filter(frequency_band %in% c("Alpha", "Beta", "Gamma", "Theta"))
+features_long_filtered <- features_long_filtered %>%
+  filter(measure %in% c("O", "S"))
+
+#Wrangle the data for curve fitting
+features_long_filtered<- features_long_filtered[,-1]
+
+features_long_wide <- features_long_filtered %>%
+  pivot_wider(names_from = timepoint, values_from = value) %>%
+  arrange(subject_id, frequency_band, measure)
+
+write.csv(features_long_wide, "Features_CurveFit.csv")
+```
+
+
+
+```{r}
+
+'''
+Separate into 3 dataframes for Mann Whitney Analysis
+features_1H_modified<-features_long%>%
+  filter(timepoint=="1H")
+features_24H_modified<-features_long%>%
+  filter(timepoint=="24H")
+features_Day7_modified<-features_long%>%
+  filter(timepoint=="Day7")
+write_csv(features_1H_modified, "/Users/krisha/Desktop/BCM/Analysis/HOI_implementation/HOI_LLK_Code/SPSS_Mann_Whitney/Features_1H_modified.csv")
+write_csv(features_24H_modified, "/Users/krisha/Desktop/BCM/Analysis/HOI_implementation/HOI_LLK_Code/SPSS_Mann_Whitney/Features_24H_modified.csv")
+write_csv(features_Day7_modified, "/Users/krisha/Desktop/BCM/Analysis/HOI_implementation/HOI_LLK_Code/SPSS_Mann_Whitney/Features_Day7_modified.csv")
+
+```
+### Separate the frequency bands and measures and loop through a list of models
+
+```{r}
+# # Define frequency bands and measures
+frequency_bands <- unique(features_long$frequency_band)
+measures <- unique(features_long$measure)
+# 
+# # Loop through frequency bands and measures
+# for (band in frequency_bands) {
+#   for (measure in measures) {
+#     
+#     # Filter data for the specific frequency band and measure
+#     data_subset <- features_long %>%
+#       filter(frequency_band == band, measure == measure)
+#     
+#     # Fit the repeated measures ANOVA model with subject as random effect
+#     model <- aov_car(value ~ Group * timepoint + Error(subject_id), data = data_subset)
+#     
+#     # Print ANOVA summary
+#     cat(paste("ANOVA for Frequency Band:", band, "and Measure:", measure, "\n"))
+#     print(summary(model))
+#     
+#     # Estimated marginal means (similar to SPSS output)
+#     emm <- emmeans(model, ~ Group * timepoint)
+#     print(emm)
+#     
+#     # Plot estimated marginal means with confidence intervals
+#     emm_plot <- ggplot(as.data.frame(emm), aes(x = timepoint, y = emmean, color = Group, group = Group)) +
+#       geom_line() +
+#       geom_point() +
+#       geom_errorbar(aes(ymin = emmean - SE, ymax = emmean + SE), width = 0.2) +
+#       labs(title = paste("Estimated Marginal Means for", band, "and", measure),
+#            x = "Timepoint", y = "Estimated Mean") +
+#       theme_minimal()
+#     
+#     print(emm_plot)
+#     
+#     # Descriptive statistics
+#     descriptive_stats <- data_subset %>%
+#       group_by(Group, timepoint) %>%
+#       summarise(mean_value = mean(value, na.rm = TRUE),
+#                 sd_value = sd(value, na.rm = TRUE),
+#                 N = n(), .groups = 'drop')
+#     
+#     print(descriptive_stats)
+#     
+#     # Studentized residuals from the linear model inside the aov_car
+#     residuals <- rstudent(model$lm)
+#   }
+# }
+# 
+
+```
+
+```{r}
+# Loop over each frequency band and each measure
+for (band in frequency_bands) {
+  for (measure in measures) {
+    
+    # Subset the data for the current frequency band and measure
+    data_sub <- subset(features_long, frequency_band == band & measure == measure)
+    
+    # Fit the mixed model without intercept (ensuring 1H is included as an explicit level)
+    model <- lmer(value ~ Group * timepoint + (1 | subject_id), data = data_sub, contrasts = list(timepoint = "contr.sum"))
+    
+    # Print a header for the current band and measure
+    cat("\n----------------------------------------------------------\n")
+    cat("Frequency Band: ", band, " | Measure: ", measure, "\n")
+    cat("----------------------------------------------------------\n")
+    
+    # Summarize the model
+    model_summary <- summary(model)
+    print(model_summary)
+    
+    # Calculate estimated marginal means
+    emmeans_results <- emmeans(model, ~ Group * timepoint)
+    print(emmeans_results)
+    
+    # Use broom.mixed::tidy to visualize the model output
+    tidy_model <- broom.mixed::tidy(model)
+    print(tidy_model)
+    
+    # Visualize the emmeans results
+    plot(emmeans_results, comparisons = TRUE) + 
+      ggtitle(paste("Estimated Marginal Means for", measure, "in", band, "band")) +
+      theme_minimal()
+  }
+}
+
+
+```
+
+
